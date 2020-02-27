@@ -1,0 +1,15 @@
+ wget https://iterm2.com/imgcat
+
+chmod 777 imgcat
+
+mkdir bin
+
+mv imgcat /home/fenghui/bin
+
+将imgcat 的执行路径添加到到配置文件中
+
+export PATH=$PATH:/home/fenghui/bin
+
+source ~/.bash_profile
+
+

@@ -1,0 +1,36 @@
+stage1：
+pytorch 或者 mxnet 模型转化为onnx 模型，mxnet有 mxnet_onnx.export()导出onnx
+pytorch有torch.export()导出onnx
+
+----------
+stage2：
+onnx模型在经过onnx2caffe项目转化为caffe模型，海思只能运行caffe模型，
+
+--------------
+
+stage3：
+配置交叉编译的环境变量 source environment-setup-cortexa7-neon-vfpv4-poky-linux-gnueabi  即可自动配置
+然后还要配置 protobuf、opencv等，这些根据文档安装配置即可
+所有的环境变量和以来都安装好以后：
+然后使用命令../linux/mmaper/nnie_mapper_12  xx.cfg 将caffe模型转化为海思可以识别并运行的模型，xx.cfg是一个
+配置文件；里面包含的内容包括：
+  1 [prototxt_file]  ./mfn_64_nose.prototxt
+  2 [caffemodel_file] ./mfn_64_nose.caffemodel
+  3 [batch_num] 1
+  4 [net_type] 0
+  5 [sparse_rate] 0
+  6 [compile_mode] 1
+  7 [is_simulation] 0
+  8 [log_level] 3
+  9 [instruction_name] ./reg_mfn_64_nose_inst_bgr
+ 10 [RGB_order] BGR
+ 11 [data_scale] 0.0039215686
+ 12 [internal_stride] 16
+ 13 [image_list] ./img_path.lst
+ 14 [image_type] 1
+ 15 [mean_file] ./mean.txt
+ 16 [norm_type] 5
+ 
+ 去对应海思的文档即可理解各个字段的意思，BGR  对应的imgage_type为1，即：海思的输入为普通的bgr图片，
+ 
+：

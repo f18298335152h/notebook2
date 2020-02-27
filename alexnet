@@ -1,0 +1,94 @@
+1.具有历史意义的CNN网络
+
+卷积后图片尺寸的变化公式[(w-f+2*pad)/stride] +1(向下取整)
+pooling 后尺寸变化公式  [(w-f+2)/stride] +1(向下取整)，pooling 通道数不变（w代表图片火鹤feature map的宽或者高）
+
+alexnet网络的核心架构
+(输入)---->(卷积)---->(pooling)---->(normal)---->(卷积)---->(max pooling)---->(normal)---->(卷积)---->(卷积)----->(卷积)---->(pooling)---->(fc)---->(fc)--->(softmax)
+
+alexnet网络的核心处理过程
+
+(输入227*227*3)----->(conv1 卷积 11*11*3,96个卷积核,stride=4)----->(55*55*96)---->(relu)---->(55*55*96)----->(normal)---->(max pooling,3*3,stride=2)----->(27*27*96)
+
+----->(conv2 卷积5*5 ,256,stride=1,pad=2，group=2)---->(27*27*256)---->(relu)---->(normal)---->(max pooling 3*3,stride=2)--->(13*13*256)
+
+---->(conv3 卷积3*3，384，pad=1,stride=1)----->(13*13*384)---->(relu)
+
+---->(conv4 卷积 3*3*384,pad=1,stride=1)------->(13*13*384)---->(relu)
+
+---->(conv5 卷积3*3*256，pad=1,stride=1)------->(13*13*256)----->(relu)----->(max pooling,3*3,stride=2)------>(6*6*256)
+
+----->(fc 4096,dropout)----->(relu)
+
+----->(fc 4096,dropout)----->(relu)
+
+------>(softmax,1000)------>最终提取的特征结果
+
+
+alexnet 不同于lenet5的点有：
+1.使用relu线性修正单元，加快收敛速度，并且由于公式本身当数据小于零时为0，因此提供了数据的稀疏性
+
+2.使用lrn 局部归一化，[batch,w,h]对第i张图的第j个通道的像素矩阵中（x,y）的坐标点进行归一化的方法是，
+用该图片该通道上（x,y）对应的像素值/除以该图片该（x,y）坐标点对应的若干通道上同样位置的像素值的和。
+提高泛化能力。大的值相对更大，抑制相对小的值，有点类似softmax的意思。
+
+3.在第二层卷积的时候使用了group=2,使用2个GPU并行处理网络中数值的计算。
+
+4.使用了dropout 和数据增广（对原始图片进行旋转等操作获取更多的图片），增强网络的泛化能力。
+
+
+
+mxnet 代码实现
+
+"""
+Reference:
+Krizhevsky, Alex, Ilya Sutskever, and Geoffrey E. Hinton. "Imagenet classification with deep convolutional neural networks." Advances in neural information processing systems. 2012.
+"""
+import mxnet as mx
+import numpy as np
+
+def get_symbol(num_classes, dtype='float32', **kwargs):
+    input_data = mx.sym.Variable(name="data")
+    if dtype == 'float16':
+        input_data = mx.sym.Cast(data=input_data, dtype=np.float16)
+    # stage 1
+    conv1 = mx.sym.Convolution(name='conv1',
+        data=input_data, kernel=(11, 11), stride=(4, 4), num_filter=96)
+    relu1 = mx.sym.Activation(data=conv1, act_type="relu")
+    lrn1 = mx.sym.LRN(data=relu1, alpha=0.0001, beta=0.75, knorm=2, nsize=5)
+    pool1 = mx.sym.Pooling(
+        data=lrn1, pool_type="max", kernel=(3, 3), stride=(2,2))
+    # stage 2
+    conv2 = mx.sym.Convolution(name='conv2',
+        data=pool1, kernel=(5, 5), pad=(2, 2), num_filter=256)
+    relu2 = mx.sym.Activation(data=conv2, act_type="relu")
+    lrn2 = mx.sym.LRN(data=relu2, alpha=0.0001, beta=0.75, knorm=2, nsize=5)
+    pool2 = mx.sym.Pooling(data=lrn2, kernel=(3, 3), stride=(2, 2), pool_type="max")
+    # stage 3
+    conv3 = mx.sym.Convolution(name='conv3',
+        data=pool2, kernel=(3, 3), pad=(1, 1), num_filter=384)
+    relu3 = mx.sym.Activation(data=conv3, act_type="relu")
+    conv4 = mx.sym.Convolution(name='conv4',
+        data=relu3, kernel=(3, 3), pad=(1, 1), num_filter=384)
+    relu4 = mx.sym.Activation(data=conv4, act_type="relu")
+    conv5 = mx.sym.Convolution(name='conv5',
+        data=relu4, kernel=(3, 3), pad=(1, 1), num_filter=256)
+    relu5 = mx.sym.Activation(data=conv5, act_type="relu")
+    pool3 = mx.sym.Pooling(data=relu5, kernel=(3, 3), stride=(2, 2), pool_type="max")
+    # stage 4
+    flatten = mx.sym.Flatten(data=pool3)
+    fc1 = mx.sym.FullyConnected(name='fc1', data=flatten, num_hidden=4096)
+    relu6 = mx.sym.Activation(data=fc1, act_type="relu")
+    dropout1 = mx.sym.Dropout(data=relu6, p=0.5)
+    # stage 5
+    fc2 = mx.sym.FullyConnected(name='fc2', data=dropout1, num_hidden=4096)
+    relu7 = mx.sym.Activation(data=fc2, act_type="relu")
+    dropout2 = mx.sym.Dropout(data=relu7, p=0.5)
+    # stage 6
+    fc3 = mx.sym.FullyConnected(name='fc3', data=dropout2, num_hidden=num_classes)
+    if dtype == 'float16':
+        fc3 = mx.sym.Cast(data=fc3, dtype=np.float32)
+    softmax = mx.sym.SoftmaxOutput(data=fc3, name='softmax')
+    return softmax
+
+

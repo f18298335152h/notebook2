@@ -1,0 +1,19 @@
+
+ipython
+
+
+import 相应的包
+
+run -d xx.py
+
+b 31  在31设置断电
+
+c  执行到断点处
+
+n  单步执行
+
+quit  退出 
+
+s  进入函数内部
+
+ipython 内部使用ipdb来debug

@@ -1,0 +1,37 @@
+一个数据集通常需要考虑的问题如下：
+
+1.数据中人脸yaw。roll等角度分布情况
+2.数据中每个人对应的图片数量分布
+3.人脸图像大小分布
+4.数据来源，
+
+
+
+estimated mean accuracy μˆ 平均准确率
+
+     μˆ = （p1+p2+p3+...+p10）/10
+
+pi为每次测试的acc。
+
+standard error of the mean  平均标准差
+
+    se = σˆ/seq(10)
+    
+    σˆ 为标准差
+    
+    σˆ = seq(（p1- μˆ）^2+....(p10-μˆ)^2 ) / 9
+
+
+lfw  数据分为两份，view 1.和view2， 
+
+view 1分为train和validaction，
+view2为10份，每分300对，做十字交叉验证。
+
+具体是：
+    accuracies = []
+    for i in range(10):
+        找到最好阈值 = find(9份train)
+        acc = cal(找到最好阈值,一份test)
+        accuracies.append(acc)
+    
+np.mean(accuracies), np.std(accuracies),

@@ -1,0 +1,20 @@
+创建并指定session名字
+tmux new -s $session_name
+
+删除session
+Ctrl+b :kill-session
+
+临时退出session
+Ctrl+b d
+
+列出session
+tmux ls
+
+进入已存在的session
+tmux a -t $session_name
+
+删除所有session
+Ctrl+b :kill-server
+
+删除指定session
+tmux kill-session -t $session_name

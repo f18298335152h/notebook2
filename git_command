@@ -1,0 +1,143 @@
+将本地项目上传至 gitlab
+
+    1.在本地项目中 依次执行：git init -- git add .  -- git commit -m "something" -- git remote add origin 远程git地址(git@git.tuputech.com:fenghui/frvt_benchmark.git)
+    
+    2.在本地项目中执行 git push origin master
+
+将本地项目合并到其他的gitlab项目中：
+    
+    1.首先拉取git项目的指定分支，然后在该执行分支内添加自己的内容，添加好以后，在该分支上另外新创建一个分支，然后push，此时该份被修改过的分支代码被push到了新的分支上，
+      该分支就是你指定的分支，以后所有的修改都在该分支上执行即可。
+       对应的命令依次是：（查看当前分支是否为拉取的指定分支：git branch，然后，修改代码，修改完成后-> git checkout -b dev(新的分支名称)--> 
+                            git branch 查看当前所在位置是否为新创建的分支上---> git push origin dev 将新创建的分支关联远程git----> git add. ---> git commit -m "something"--->
+                             git push origin dev 将代码push到新创建分支上）
+                             
+                             
+拉取指定分支 ： git clone -b dev(分支名)  git@git........(git项目地址)
+
+查看commit  : git log
+
+查看某个文件每行代码的修改人：git blame filename
+
+查看代码更新的部分：首先使用git log -p filename ，然后git show （commit 的记录）  即可查看上次该filename文件的修改部分
+
+如果出现合并分支的错误---error: 无法推送一些引用到 'git@git.tuputech.com:fenghui/notebook.git'----》（git fetch ---> git merge origin/master）
+
+
+合并分支到master ：git merge dev  将分支dev合并到master中
+
+合并分支错误：使用git status 查看冲突文件，然后进入文件将 <<<<<<HEAD  ======   >>>>>dev  标记有问题的地方手动修改，然后在git merge dev
+
+
+
+
+
+$git fetch origin    //获取远程更新
+$git merge origin/master //把更新的内容合并到本地分支
+$ git push origin master 把合并内容提交master（如果没有权限，则在gitlab上提交merge request）
+
+
+
+
+merge 的步骤
+1.首先在本分支下merge master，保证分支内容跟进masetr 
+2. push origin 分支
+3.切换到masetr 分支 merge 分支
+4.提交merge request
+
+具体步骤：
+#git checkout 20180315  //切换到分支下
+#git merge master  //合并master到分支，
+#git status（提示：Your branch is up-to-date with 'origin/master'.）
+#git push origin 20180315  //push到远程分支
+
+git fetch origin
+git merge origin/master (将master 最新的内容合并到本地分支中)
+结果冲突
+git add 
+git commit -m ""
+git push origin branch
+git push origin 20180315 (将合并后的内容push到远程)
+
+git checkout master
+git merge 20180315
+git push origin master(有权限)
+
+
+
+
+在git项目中删除某些文件，并重新push的时候，如果这些文件之前已经被push过，
+说明文件已经被git托管，要删除这些文件使用git rm 命令，使用普通的rm命令，
+提交后并不会在git仓库里有任何变化。
+
+
+
+
+ ! [rejected]        ncnn_benchmark -> ncnn_benchmark (non-fast-forward)
+error: failed to push some refs to 'git@git.tuputech.com:wangyuequan/tpncnn.git'
+修复：
+  git fetch origin 
+  git merge origin branch
+  
+  
+  
+删除分支
+
+git branch --delete dev
+
+
+如果忘记git pull就在本地做了修改，在执行git pull时会报错误，此时执行如下命令，会将本地
+修改的代码暂存起来，然后再git pull更新服务器的代码，然后再执行 add commit 将本地的修改提交上去
+即可修复错误。
+git stash
+git pull origin master
+git stash pop
+
+如果你想完全地覆盖本地的代码，只保留服务器端代码，则直接回退到上一个版本，再进行pull
+git reset --hard
+git pull origin master
+
+
+
+如果本地没有拉取git的更新，然后在本地进行了修改，然后在提交的时候会出错，
+如果你重新 git pull 拉取，也会被禁止，因为你本地的修改会被远程的git覆盖，执行以下命令可：
+1. 首先将本地的修改隐藏起来，
+2. gitpull 拉取git更新
+3. 然后将隐藏的重新拿出来即可。
+git stash
+git pull origin master
+git stash pop
+
+
+
+
+如何将git仓库里的tpncnn和github上的ncnn保持同步》
+git remote add upstream git@github.com:Tencent/ncnn.git 设置本地tpncnn的上游为github中的ncnn
+git fetch upstream
+git checkout master
+git merge upstream/master
+git push origin master
+即可完成上游代码和本地git仓库中代码的合并，解决冲突即可
+
+
+
+git pull git@github.com:Tencent/ncnn.git master 拉取新的代码并合并 
+在tpncnn的分支ncnn中拉取github中的ncnn新代码，
+然后将ncnn合并到ncnn_online中，ncnn_online merge ncnn 
+这样就可以最为github ncnn的开发者维护，并且保持本地gitlab中的tpncnn能和线上一致
+
+git push git@github.com:Tencent/ncnn.git  在得到允许后推送github到远程分支下
+
+
+
+
+#### 如果当前git pull 无法拉取代码因为本地有修改，也无法push 本地代码，因为没有跟上线上的master
+可以通过以下两步做到
+1. git stash 先将本地的修改隐藏
+2. git pull  拉取线上的代码更新本地
+3. git stash pop 将本地修改从隐藏中取出来
+4. git add git commit git push 三步提交代码
+
+
+### 查看分支sdk_hisi2020  从那个分支拉的，也就是sdk_hisi2020 属于那个分支
+git reflog --date=local | grep "sdk_hisi2020"

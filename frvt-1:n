@@ -1,0 +1,101 @@
+一、编译g++ -std=c++11
+
+测试代码的组织结构
+./lib  core code
+./config  配置文件 运行算法和测试代码需要的配置数据
+./doc  version.txt 存储算法版本号
+./validation  算法验证结果
+
+Any data needed during subsequent searches should be included in the template/后续搜索期间所需的任何数据都应包含在模板中
+
+二、测试流程：
+1（注册数据库）->输入图片vector --->转化为 Template（feature ，list）
+2（搜索）--->输入图片vector  ---》转化 Template（feature ，list） 与库中的Template对比返回simliarity vector
+
+注册数据库所有的图片都会经过算法本身返回的feature list 转化为template ，并且 FRVT将所有的template转化为二进制存储到一个大文件中（EDB），EDB包含一个说明（manifest）
+包含（template ID，template length，template 在文件中的起点位置）
+
+注册数据库包含两种类型：
+1.Consolidated   每个人的身份标签明确，每个身份对应1张或者多张图片
+2.Unconsolidated  每张图片对应一个身份身份标签
+
+
+三、具体的API操作
+
+1.数据结构
+
+图片定义（width，height，RGB，图片类型）
+typedef struct Image {
+uint16_t width;
+uint16_t height;
+uint16_t depth; std::shared_ptr<uint8_t> data;
+Label description; 
+} Image;
+
+图片类型 Lable（未知，ISO标准证件，杂志报刊图片，child exploitation database（数据集））
+enum class Label {
+    UNKNOWN=0,
+    ISO,
+    MUGSHOT, PHOTOJOURNALISM,
+    EXPLOITATION,
+    WILD 
+};
+
+图片组织成vector（list）输入
+using Multiface = std::vector<Image>;
+
+眼睛坐标（算法本身返回）
+typedef struct EyePair {
+bool isLeftAssigned;
+bool isRightAssigned;
+   uint16_t xleft;
+   uint16_t yleft;
+uint16_t xright; uint16_t yright;
+} EyePair;
+
+模版类型（注册，搜索）
+enum class TemplateRole { 
+Enrollment_1N,
+Search_1N };
+
+数据库类型
+enum class GalleryType { 
+Consolidated,
+Unconsolidated };
+
+算法返回的候选列表（）
+typedef struct Candidate {
+bool isAssigned;
+std::string templateId; 
+double similarityScore;
+} Candidate;
+
+
+具体的操作流程：
+接口类Class IdentInterface---继承该接口，并实现该接口函数
+
+1 注册数据库 --》对比图片模版创建  --》搜索（similarity vector）----》存储或删除搜索图片的模版
+
+
+1. initializeTemplateCreation（configDir，role）
+初始化模版准备：配置文件和指定模版角色，为创建模版做准备
+2.createTemplate（faces，role，templ,eyeCoordinates）
+,创建模版---输入face图片，返回模版feature list（模型本身返回），eyeCoordinates 眼睛坐标
+3.finalizeEnrollment（enrollmentDir，edbName，edbManifestName，galleryType） 
+存储模版，模版存储目录enrollmentDir（EDB），edbName 文件名，edbManifestName 文件名，galleryType 指定库的类型
+
+4.initializeIdentification（configDir，enrollmentDir）
+对比图片的模版初始化
+
+5.identifyTemplate（idTemplate，candidateListLength，candidateList，decision）
+创建对比图片的模版，并返回候选（相似度）列表
+
+6.Some of  our tests will require the processing of up to 1500 images in a single template.
+
+
+null implementation（测试）
+
+
+Usage: ./validate enroll|finalize|search -c configDir -e enrollDir -o outputDir -h outputStem -i inputFile -t numForks
+
+

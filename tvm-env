@@ -1,0 +1,10 @@
+ANDROID_NDK_HOME=/Users/mac/PycharmProjects/android-ndk-r16b
+TVM_NDK_CC=/Users/mac/PycharmProjects/android-ndk-r16b/toolchains/arm-linux-androideabi-4.9/prebuilt/darwin-x86_64/bin/arm-linux-androideabi-ld
+ANDROID_HOME=/Users/mac/PycharmProjects
+TVM_HOME=/Users/mac/PycharmProjects/test_tvm/tvm
+PYTHONPATH=/Users/mac/PycharmProjects/test_tvm/tvm/python:/Users/mac/PycharmProjects/test_tvm/tvm/topi/python:/Users/mac/PycharmProjects/test_tvm/tvm/nnvm/python:/Users/mac/PycharmProjects/test_tvm/tvm/src:
+TVM_TRACKER_HOST=192.168.10.71
+TVM_TRACKER_PORT=9091
+
+
+getprop ro.product.cpu.abi  查看cpu型号，例如arm64-v8 是64位

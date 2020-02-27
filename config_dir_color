@@ -1,0 +1,13 @@
+1.拷贝/etc/DIR_COLORS文件为当前主目录的 .dir_colors
+2.修改~/.dir_colors中DIR对应的颜色
+
+在 ~/.bash_profil 或者 ~/.bashrc 文件中添加如下语句，然后 source  使其生效即可
+ if [ -x /usr/bin/dircolors ]; then
+          test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+          alias ls='ls --color=auto'
+          #alias dir='dir --color=auto'
+          alias grep='grep --color=auto'
+          alias fgrep='fgrep --color=auto'
+          alias egrep='egrep --color=auto'
+  fi
+

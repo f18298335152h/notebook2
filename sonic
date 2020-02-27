@@ -1,0 +1,11 @@
+报错:
+/usr/bin/ld:  /world/data-gpu-94/wyq/code/third_party/libyuv-build/hisi3516v300/lib/libyuv.a(convert.cc.o): Relocations in generic ELF (EM: 40)
+/world/data-gpu-94/wyq/code/third_party/libyuv-build/hisi3516v300/lib/libyuv.a: could not read symbols: 文件格式错误
+
+原因是交叉编译的环境没有构建好，需要构建交叉编译的环境，使用交叉编译器来编译。此处用ld编译器来编译是错误的。
+
+source /world/data-gpu-94/wyq/code/hisi/hisi_compile_env/environment-setup-cortexa7-neon-vfpv4-poky-linux-gnueabi
+unset LD_LINBARY
+source /world/data-gpu-94/wyq/code/hisi/hisi_compile_env/environment-setup-cortexa7-neon-vfpv4-poky-linux-gnueabi
+
+./build.sh

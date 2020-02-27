@@ -1,0 +1,7 @@
+normalize 提供mean值和std值，做通道上的归一化，因此提供的mean和std的值应该是一个列表，并且长度和通道数一致
+
+will normalize each channel of the input ``torch.*Tensor`` i.e.
+input[channel] = (input[channel] - mean[channel]) / std[channel]``
+
+
+transforms.ToTensor()  默认做normalize ：mean为0，std为255

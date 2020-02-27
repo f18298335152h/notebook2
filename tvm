@@ -1,0 +1,598 @@
+tvm 在tuner 的过程中报错如下：
+WARNING:autotvm:Cannot find config for target=llvm -mcpu=core-avx2, 
+    workload=('conv2d_NCHWc', (1, 16, 608, 608, 8, 'float32'), (8, 16, 3, 3, 8, 8, 'float32'), (1, 1), (0, 0), (1, 1), 'NCHW8c', 'NCHW8c', 'float32'). A fallback configuration is used, which may bring great performance regression.
+解决：
+ change the optimization level to opt_level=2, 
+https://discuss.tvm.ai/t/solved-x86-autotvm-nchw-nhcwc-conversion-seems-to-cause-config-mismatch/1781
+https://discuss.tvm.ai/t/solved-tune-conv2d-cuda-error/794/2
+
+
+measureERROR：
+MeasureResult(costs=(TimeoutError(),), error_no=6, all_cost=10  编译超时，需要更改measure_option的timeout增大。
+
+tunner微调过程中出现了大量了Current/Best:    0.00/   0.00 GFLOPS |
+可能是因为：
+1. 所有空间巨大，因此有很多无效搜索，正常
+2.配置错误。
+
+
+
+from_onnx.py  调用onnx.py转化模型为tvm确实flattern
+class Flatten(OnnxOpConverter):
+    @classmethod
+    def _impl_v1(cls, inputs, attr, params):
+        return _op.nn.batch_flatten(inputs[0])
+        
+        
+        
+本地cpu微调模型（builder,runner  本地编译，本地运行，所以是本地cpu的微调，runner可以改为远程rpc链接的手机或者板卡）
+
+
+import onnx
+
+import os
+import numpy as np
+
+import tvm
+from tvm import autotvm
+from tvm import relay
+from tvm.relay import testing
+from tvm.autotvm.tuner import XGBTuner, GATuner, RandomTuner, GridSearchTuner
+import tvm.contrib.graph_runtime as runtime
+
+def get_network(name):
+    """Get the symbol definition and random weight of a network"""
+    onnx_model = onnx.load('example_net.onnx')
+
+    input_name = 'input'
+    input_shape = (1, 3, 612, 612)
+
+    shape_dict = {input_name: input_shape}
+    net, params = relay.frontend.from_onnx(onnx_model, shape_dict)
+
+    return net, params, input_shape
+
+target = "llvm -mcpu=core-avx2"
+
+dtype = "float32"
+model_name = "optlog"
+log_file = "%s.log" % model_name
+
+# Set number of threads used for tuning based on the number of
+# physical cpu cores on your machine.
+num_threads = 1
+os.environ["TVM_NUM_THREADS"] = str(num_threads)
+
+tuning_option = {
+    'log_filename': log_file,
+    'tuner': 'random',
+    'early_stopping': 1,  # make it stop early so we don't wait too long
+
+    'measure_option': autotvm.measure_option(
+        builder=autotvm.LocalBuilder(),
+        runner=autotvm.LocalRunner(number=1, repeat=1,  # these values should probably be higher to get statistically significant measurements
+                                   min_repeat_ms=1000),
+    ),
+}
+
+# You can skip the implementation of this function for this tutorial.
+def tune_kernels(tasks,
+                 measure_option,
+                 tuner='gridsearch',
+                 early_stopping=None,
+                 log_filename='tuning.log'):
+
+    # create tmp log file
+    tmp_log_file = log_filename + ".tmp"
+    if os.path.exists(tmp_log_file):
+        os.remove(tmp_log_file)
+
+    for i, tsk in enumerate(tasks):
+        prefix = "[Task %2d/%2d] " % (i+1, len(tasks))
+        print("TASK ARGS:", tsk.args)  # debug
+
+        # converting conv2d tasks to conv2d_NCHWc tasks
+        op_name = tsk.workload[0]
+        if op_name == 'conv2d':
+            func_create = 'topi_x86_conv2d_NCHWc'
+        elif op_name == 'depthwise_conv2d_nchw':
+            func_create = 'topi_x86_depthwise_conv2d_NCHWc_from_nchw'
+        else:
+            raise ValueError("Tuning {} is not supported on x86".format(op_name))
+
+        task = autotvm.task.create(func_create, args=tsk.args,
+                                   target=target, template_key='direct')
+        task.workload = tsk.workload
+
+        # create tuner
+        if tuner == 'xgb' or tuner == 'xgb-rank':
+            tuner_obj = XGBTuner(task, loss_type='rank')
+        elif tuner == 'ga':
+            tuner_obj = GATuner(task, pop_size=50)
+        elif tuner == 'random':
+            tuner_obj = RandomTuner(task)
+        elif tuner == 'gridsearch':
+            tuner_obj = GridSearchTuner(task)
+        else:
+            raise ValueError("Invalid tuner: " + tuner)
+
+        # do tuning
+        n_trial=len(task.config_space)
+        tuner_obj.tune(n_trial=n_trial,
+                       early_stopping=early_stopping,
+                       measure_option=measure_option,
+                       callbacks=[
+                           autotvm.callback.progress_bar(n_trial, prefix=prefix),
+                           autotvm.callback.log_to_file(tmp_log_file)])
+
+    # pick best records to a cache file
+    autotvm.record.pick_best(tmp_log_file, log_filename)
+    os.remove(tmp_log_file)
+
+def tune_and_evaluate(tuning_opt):
+    # extract workloads from relay program
+    print("Extract tasks...")
+    net, params, data_shape = get_network(model_name)
+    tasks = autotvm.task.extract_from_program(net, target=target,
+                                              params=params, ops=(relay.op.nn.conv2d,))
+
+    # run tuning tasks
+    print("Tuning...", len(tasks))
+    tune_kernels(tasks, **tuning_opt)
+
+    # compile kernels with history best records
+    with autotvm.apply_history_best(log_file):
+        print("Compile...")
+        with relay.build_config(opt_level=3):
+            graph, lib, params = relay.build_module.build(
+                net, target=target,  params=params)
+
+        # upload parameters to device
+        ctx = tvm.cpu()
+        data_tvm = tvm.nd.array((np.random.uniform(size=data_shape)).astype(dtype))
+        module = runtime.create(graph, lib, ctx)
+        module.set_input('input', data_tvm)
+        module.set_input(**params)
+
+        # evaluate
+        print("Evaluate inference time cost...")
+        ftimer = module.module.time_evaluator("run", ctx, number=1, repeat=1)
+        prof_res = np.array(ftimer().results) * 1000  # convert to millisecond
+        print("Mean inference time (std dev): %.2f ms (%.2f ms)" %
+              (np.mean(prof_res), np.std(prof_res)))                                    # Gives 1.8 seconds
+
+tune_and_evaluate(tuning_option)
+
+
+
+
+如果在微调的时候遇到如下错误：则需要将relay.op.nn.conv2d_transpose也添加到优化ops中，即：tasks = autotvm.task.extract_from_program(net, target=target, params=params, ops=(relay.op.nn.conv2d,relay.op.nn.conv2d_transpose))
+WARNING:autotvm:Cannot find config for target=llvm -device=arm_cpu -target=arm-linux-gnueabihf -mattr=+neon, workload=(‘conv2d_transpose_nchw’, (1, 64, 3, 3, ‘float32’), (64, 64, 2, 2, ‘float32’), (2, 2), (0, 0), ‘float32’).
+A fallback configuration is used, which may bring great performance regression.
+
+
+在利用autotvm微调量化后的int8 模型时出现了错误：
+RuntimeError: Cannot find float number operation in this operator. Please use `cfg.add_flop` to manually set FLOP for this operator
+这是tvm自己的bug，在统计flops的时候，只考虑了float类型，解决方法如下：
+https://github.com/dmlc/tvm/issues/2628
+https://github.com/dmlc/tvm/pull/2776
+
+
+### tvm int8 量化优化
+
+# 从前端load模型，mxnet、onnx等
+sym, _ = relay.frontend.from_mxnet(sym, {'data': data_shape})
+# 随机生成test的模型参数，如果有已训练好的模型参数可以忽略
+sym, params = tvm.relay.testing.create_workload(sym)
+# 模型量化
+with relay.quantize.qconfig(skip_k_conv=0, round_for_shift=True):
+    sym = relay.quantize.quantize(sym, params)
+# 模型优化(经过试验，tvm系统默认有一些常用的resnet的卷积优化，注意这个优化是和卷积配置包括输入输出kernel的数量绑定的)
+# 如果使用系统已有的卷积优化配置则速度可保证，如果使用一些新奇的卷积结构需要使用auto tuning优化，不然很慢
+参考 https://docs.tvm.ai/tutorials/autotvm/tune_relay_cuda.html#auto-tuning-a-convolutional-network-for-nvidia-gpu
+# load最优的优化算子，然后编译模型
+with autotvm.apply_history_best(log_file):
+    print("Compile...")
+    with relay.build_config(opt_level=3):
+        graph, lib, params = relay.build_module.build(
+            net, target=target, params=params)
+    # 加载参数并运行
+    ctx = tvm.context(str(target), 0)
+    module = runtime.create(graph, lib, ctx)
+    data_tvm = tvm.nd.array((np.random.uniform(size=input_shape)).astype(dtype))
+    module.set_input('data', data_tvm)
+    module.set_input(**params)
+    # module.set_input(**{k:tvm.nd.array(v, ctx) for k, v in params.items()})
+    module.run()
+    # 测试forward时间
+    e = module.module.time_evaluator("run", ctx, number=2000, repeat=3)
+    t = module(data_tvm).results
+    t = np.array(t) * 1000
+    print('{} (batch={}): {} ms'.format(name, batch, t.mean()))
+
+
+
+
+
+### tvm 优化以及部署
+
+环境搭建
+环境搭建？有什么好讲的？
+
+废话咯，你需要先把TVM的环境搭建出来才可以用啊，在上一篇文章中已经说过了，另外官方的安装教程最为详细，这里还是多建议看看官方的文档，很详细很具体重点把握的也很好。
+
+但是还是要强调两点：
+
+需要安装LLVM，因为这篇文章所讲的主要运行环境是CPU(树莓派的GPU暂时不用，内存有点小)，所以LLVM是必须的
+安装交叉编译器:
+Cross Compiler
+交叉编译器是什么，就是我可以在PC平台上编译生成可以直接在树莓派上运行的可执行文件。而在TVM中，我们需要利用交叉编译器在PC端编译模型并且优化，然后生成适用于树莓派(arm构架)使用的动态链接库。
+
+有这个动态链接库，我们就可以直接调用树莓派端的TVM运行时环境去调用这个动态链接库，从而执行神经网络的前向操作了。
+
+那么怎么安装呢？这里我们需要安装叫做/usr/bin/arm-linux-gnueabihf-g++的交叉编译器，在Ubuntu系统中，我们直接sudo apt-get install g++-arm-linux-gnueabihf即可，注意名称不能错，我们需要的是hf(Hard-float)版本。
+
+安装完后，执行/usr/bin/arm-linux-gnueabihf-g++ -v命令就可以看到输出信息:
+
+prototype@prototype-X299-UD4-Pro:~/$ /usr/bin/arm-linux-gnueabihf-g++ -v
+Using built-in specs.
+COLLECT_GCC=/usr/bin/arm-linux-gnueabihf-g++
+COLLECT_LTO_WRAPPER=/usr/lib/gcc-cross/arm-linux-gnueabihf/5/lto-wrapper
+Target: arm-linux-gnueabihf
+Configured with: ../src/configure -v --with-pkgversion='Ubuntu/Linaro 5.4.0-6ubuntu1~16.04.9' --with-bugurl=file:///usr/share/doc/gcc-5/README.Bugs --enable-languages=c,ada,c++,java,go,d,fortran,objc,obj-c++ --prefix=/usr --program-suffix=-5 --enable-shared --enable-linker-build-id --libexecdir=/usr/lib --without-included-gettext --enable-threads=posix --libdir=/usr/lib --enable-nls --with-sysroot=/ --enable-clocale=gnu --enable-libstdcxx-debug --enable-libstdcxx-time=yes --with-default-libstdcxx-abi=new --enable-gnu-unique-object --disable-libitm --disable-libquadmath --enable-plugin --with-system-zlib --disable-browser-plugin --enable-java-awt=gtk --enable-gtk-cairo --with-java-home=/usr/lib/jvm/java-1.5.0-gcj-5-armhf-cross/jre --enable-java-home --with-jvm-root-dir=/usr/lib/jvm/java-1.5.0-gcj-5-armhf-cross --with-jvm-jar-dir=/usr/lib/jvm-exports/java-1.5.0-gcj-5-armhf-cross --with-arch-directory=arm --with-ecj-jar=/usr/share/java/eclipse-ecj.jar --disable-libgcj --enable-objc-gc --enable-multiarch --enable-multilib --disable-sjlj-exceptions --with-arch=armv7-a --with-fpu=vfpv3-d16 --with-float=hard --with-mode=thumb --disable-werror --enable-multilib --enable-checking=release --build=x86_64-linux-gnu --host=x86_64-linux-gnu --target=arm-linux-gnueabihf --program-prefix=arm-linux-gnueabihf- --includedir=/usr/arm-linux-gnueabihf/include
+Thread model: posix
+gcc version 5.4.0 20160609 (Ubuntu/Linaro 5.4.0-6ubuntu1~16.04.9) 
+树莓派环境搭建
+因为我们是在PC端利用TVM编译神经网络的，所以在树莓派端我们只需要编译TVM的运行时环境即可(TVM可以分为两个部分，一部分为编译时，另一个为运行时，两者可以拆开)。
+
+这里附上官方的命令，注意树莓派端也需要安装llvm，树莓派端的llvm可以在llvm官方找到已经编译好的压缩包，解压后添加环境变量即可：
+
+git clone --recursive https://github.com/dmlc/tvm
+cd tvm
+mkdir build
+cp cmake/config.cmake build   # 这里修改config.cmake使其支持llvm
+cd build
+cmake ..
+make runtime
+在树莓派上编译TVM的运行时并不需要花很久的时间。
+
+完成部署
+环境搭建好之后，就让我们开始吧~
+
+
+
+
+
+
+首先我们依然需要一个自己的测试模型，在这里我使用之前训练好的，识别剪刀石头布手势的模型权重，然后利用Pytorch导出ONNX模型出来。具体的导出步骤可以看我之前的这两篇文章，下述两篇文章中使用的模型与本篇文章使用的是同一个模型。
+
+利用Pytorch的C++前端(libtorch)读取预训练权重并进行预测
+Pytorch的C++端(libtorch)在Windows中的使用
+
+
+(上图是之前的识别剪刀石头布的一个权重模型)
+
+OK，那我们拥有了一个模型叫做mobilenetv2-128_S.onnx，这个模型也就是通过Pytorch导出的ONNX模型，利用Netron瞧一眼：
+
+
+整个模型的输入和输出上图写的都很清楚了。
+
+测试模型
+拿到模型后，我们首先测试模型是否可以正确工作，同上一篇介绍TVM的文章类似，我们利用TVM的PYTHON前端去读取我们的.onnx模型，然后将其编译并运行，最后利用测试图像测试其是否可以正确工作，其中核心代码如下：
+
+onnx_model = onnx.load('../test/new-mobilenetv2-128_S.onnx')
+
+img = Image.open('../datasets/hand-image/paper.jpg').resize((128, 128))
+
+img = np.array(img).transpose((2, 0, 1)).astype('float32')  
+img = img/255.0           # 注意在Pytorch中的tensor范围是0-1
+x = img[np.newaxis, :]
+
+target = 'llvm'
+
+input_name = '0'      # 这里需要注意，因为我生成的.onnx模型的输入代号是0，所以这里改为0
+shape_dict = {input_name: x.shape}
+sym, params = relay.frontend.from_onnx(onnx_model, shape_dict)
+
+with relay.build_config(opt_level=3):
+    intrp = relay.build_module.create_executor('graph', sym, tvm.cpu(0), target)
+
+dtype = 'float32'
+func = intrp.evaluate(sym)
+
+# 输出推断的结果
+tvm_output = intrp.evaluate(sym)(tvm.nd.array(x.astype(dtype)), **params).asnumpy()
+max_index = tvm_output.argmax()
+print(max_index)
+我这个模型输出的结果为三个手势的输出值大小(顺序分别为布、剪刀、石头)，上述的代码打印出来的值为0，意味着可以正确识别paper.jpg输入的图像。说明这个转化过程是没有问题的。
+
+导出动态链接库
+上面这个步骤只是将.onnx模型利用TVM读取并且预测出来，如果我们需要部署的话我们就需要导出整个模型的动态链接库，至于为什么是动态链接库，其实TVM是有多种的导出模式的(也可以导出静态库)，但是这里不细说了：
+
+
+总之我们的目标就是导出so动态链接库，这个链接库中包括了我们神经网络所需要的一切推断功能。
+
+那么怎么导出呢？其实官方已经有很详细的导出说明。我这里不进行赘述了，仅仅展示核心的代码加以注释即可。
+
+请看以下的代码：
+
+#开始同样是读取.onnx模型
+
+onnx_model = onnx.load('../../test/new-mobilenetv2-128_S.onnx')
+img = Image.open('../../datasets/hand-image/paper.jpg').resize((128, 128))
+
+# 以下的图片读取仅仅是为了测试
+img = np.array(img).transpose((2, 0, 1)).astype('float32')
+img = img/255.0    # remember pytorch tensor is 0-1
+x = img[np.newaxis, :]
+
+# 这里首先在PC的CPU上进行测试 所以使用LLVM进行导出
+target = tvm.target.create('llvm')
+
+input_name = '0'  # change '1' to '0'
+shape_dict = {input_name: x.shape}
+sym, params = relay.frontend.from_onnx(onnx_model, shape_dict)
+
+# 这里利用TVM构建出优化后模型的信息
+with relay.build_config(opt_level=2):
+    graph, lib, params = relay.build_module.build(sym, target, params=params)
+
+dtype = 'float32'
+
+from tvm.contrib import graph_runtime
+
+# 下面的函数导出我们需要的动态链接库 地址可以自己定义
+print("Output model files")
+libpath = "../tvm_output_lib/mobilenet.so"
+lib.export_library(libpath)
+
+# 下面的函数导出我们神经网络的结构，使用json文件保存
+graph_json_path = "../tvm_output_lib/mobilenet.json"
+with open(graph_json_path, 'w') as fo:
+    fo.write(graph)
+
+# 下面的函数中我们导出神经网络模型的权重参数
+param_path = "../tvm_output_lib/mobilenet.params"
+with open(param_path, 'wb') as fo:
+    fo.write(relay.save_param_dict(params))
+# -------------至此导出模型阶段已经结束--------
+
+# 接下来我们加载导出的模型去测试导出的模型是否可以正常工作
+loaded_json = open(graph_json_path).read()
+loaded_lib = tvm.module.load(libpath)
+loaded_params = bytearray(open(param_path, "rb").read())
+
+# 这里执行的平台为CPU
+ctx = tvm.cpu()
+
+module = graph_runtime.create(loaded_json, loaded_lib, ctx)
+module.load_params(loaded_params)
+module.set_input("0", x)
+module.run()
+out_deploy = module.get_output(0).asnumpy()
+
+print(out_deploy)
+上述的代码输出[[13.680096 -7.218611 -6.7872353]]，因为输入的图像是paper.jpg,所以输出的三个数字第一个数字最大，没有毛病。
+
+执行完代码之后我们就可以得到需要的三个文件
+
+mobilenet.so
+mobilenet.json
+mobilenet.params
+得到三个文件之后，接下来我们利用TVM的C++端读取并运行起来。
+
+在PC端利用TVM部署C++模型
+如何利用TVM的C++端去部署，官方也有比较详细的文档，这里我们利用TVM和OpenCV读取一张图片，并且使用之前导出的动态链接库去运行神经网络对这张图片进行推断。
+
+我们需要的头文件为：
+
+#include <cstdio>
+#include <dlpack/dlpack.h>
+#include <opencv4/opencv2/opencv.hpp>
+#include <tvm/runtime/module.h>
+#include <tvm/runtime/registry.h>
+#include <tvm/runtime/packed_func.h>
+#include <fstream>
+其实这里我们只需要TVM的运行时，另外dlpack是存放张量的一个结构。其中OpenCV用于读取图片，而fstream则用于读取json和参数信息：
+
+tvm::runtime::Module mod_dylib =
+    tvm::runtime::Module::LoadFromFile("../files/mobilenet.so");
+
+std::ifstream json_in("../files/mobilenet.json", std::ios::in);
+std::string json_data((std::istreambuf_iterator<char>(json_in)), std::istreambuf_iterator<char>());
+json_in.close();
+
+// parameters in binary
+std::ifstream params_in("../files/mobilenet.params", std::ios::binary);
+std::string params_data((std::istreambuf_iterator<char>(params_in)), std::istreambuf_iterator<char>());
+params_in.close();
+
+TVMByteArray params_arr;
+params_arr.data = params_data.c_str();
+params_arr.size = params_data.length();
+在读取完信息之后，我们要利用之前读取的信息，构建TVM中的运行图(Graph_runtime)：
+
+int dtype_code = kDLFloat;
+int dtype_bits = 32;
+int dtype_lanes = 1;
+int device_type = kDLCPU;
+int device_id = 0;
+
+tvm::runtime::Module mod = (*tvm::runtime::Registry::Get("tvm.graph_runtime.create"))
+        (json_data, mod_dylib, device_type, device_id);
+然后利用TVM中函数建立一个输入的张量类型并且为它分配空间：
+
+DLTensor *x;
+int in_ndim = 4;
+int64_t in_shape[4] = {1, 3, 128, 128};
+TVMArrayAlloc(in_shape, in_ndim, dtype_code, dtype_bits, dtype_lanes, device_type, device_id, &x);
+其中DLTensor是个灵活的结构，可以包容各种类型的张量，而在创建了这个张量后，我们需要将OpenCV中读取的图像信息传入到这个张量结构中：
+
+// 这里依然读取了papar.png这张图
+image = cv::imread("/home/prototype/CLionProjects/tvm-cpp/data/paper.png");
+
+cv::cvtColor(image, frame, cv::COLOR_BGR2RGB);
+cv::resize(frame, input,  cv::Size(128,128));
+
+float data[128 * 128 * 3];
+// 在这个函数中 将OpenCV中的图像数据转化为CHW的形式 
+Mat_to_CHW(data, input);
+需要注意的是，因为OpenCV中的图像数据的保存顺序是(128,128,3)，所以这里我们需要将其调整过来，其中Mat_to_CHW函数的具体内容是:
+
+void Mat_to_CHW(float *data, cv::Mat &frame)
+{
+    assert(data && !frame.empty());
+    unsigned int volChl = 128 * 128;
+
+    for(int c = 0; c < 3; ++c)
+    {
+        for (unsigned j = 0; j < volChl; ++j)
+            data[c*volChl + j] = static_cast<float>(float(frame.data[j * 3 + c]) / 255.0);
+    }
+
+}
+当然别忘了除以255.0因为在Pytorch中所有的权重信息的范围都是0-1。
+
+在将OpenCV中的图像数据转化后，我们将转化后的图像数据拷贝到之前的张量类型中:
+
+// x为之前的张量类型 data为之前开辟的浮点型空间
+memcpy(x->data, &data, 3 * 128 * 128 * sizeof(float));
+然后我们设置运行图的输入(x)和输出(y):
+
+// get the function from the module(set input data)
+tvm::runtime::PackedFunc set_input = mod.GetFunction("set_input");
+set_input("0", x);
+
+// get the function from the module(load patameters)
+tvm::runtime::PackedFunc load_params = mod.GetFunction("load_params");
+load_params(params_arr);
+
+DLTensor* y;
+int out_ndim = 2;
+int64_t out_shape[2] = {1, 3,};
+TVMArrayAlloc(out_shape, out_ndim, dtype_code, dtype_bits, dtype_lanes, device_type, device_id, &y);
+
+// get the function from the module(run it)
+tvm::runtime::PackedFunc run = mod.GetFunction("run");
+
+// get the function from the module(get output data)
+tvm::runtime::PackedFunc get_output = mod.GetFunction("get_output");
+此刻我们就可以运行了：
+
+run();
+get_output(0, y);
+
+// 将输出的信息打印出来
+auto result = static_cast<float*>(y->data);
+for (int i = 0; i < 3; i++)
+    cout<<result[i]<<endl;
+最后的输出信息是
+
+13.8204
+-7.31387
+-6.8253
+可以看到，成功识别出了布这张图片，到底为止在C++端的部署就完毕了。
+
+在树莓派上的部署
+在树莓派上的部署其实也是很简单的，与上述步骤中不同的地方是我们需要设置target为树莓派专用:
+
+target = tvm.target.arm_cpu('rasp3b')
+我们点进去其实可以发现rasp3b对应着-target=armv7l-linux-gnueabihf：
+
+trans_table = {
+    "pixel2":    ["-model=snapdragon835", "-target=arm64-linux-android -mattr=+neon"],
+    "mate10":    ["-model=kirin970", "-target=arm64-linux-android -mattr=+neon"],
+    "mate10pro": ["-model=kirin970", "-target=arm64-linux-android -mattr=+neon"],
+    "p20":       ["-model=kirin970", "-target=arm64-linux-android -mattr=+neon"],
+    "p20pro":    ["-model=kirin970", "-target=arm64-linux-android -mattr=+neon"],
+    "rasp3b":    ["-model=bcm2837", "-target=armv7l-linux-gnueabihf -mattr=+neon"],
+    "rk3399":    ["-model=rk3399", "-target=aarch64-linux-gnu -mattr=+neon"],
+    "pynq":      ["-model=pynq", "-target=armv7a-linux-eabi -mattr=+neon"],
+    "ultra96":   ["-model=ultra96", "-target=aarch64-linux-gnu -mattr=+neon"],
+}
+还有一点改动的是，我们在导出.so的时候需要加入cc="/usr/bin/arm-linux-gnueabihf-g++"，此时的/usr/bin/arm-linux-gnueabihf-g++为之前下载的交叉编译器。
+
+path_lib = '../tvm/deploy_lib.so'
+lib.export_library(path_lib, cc="/usr/bin/arm-linux-gnueabihf-g++")
+这时我们就可以导出来树莓派需要的几个文件，之后我们将这几个文件移到树莓派中，随后利用上面说到的C++部署代码去部署就可以了。
+
+
+TVM在树莓派上的运行
+大家可能关心的问题
+看到这里想必大家应该还有很多疑惑，限于篇幅(写的有点累呀)，这里讲几个比较重点的东西：
+
+速度
+这里可以毫不犹豫地说，对于我这个模型来说，速度提升很明显。在PC端部署中，使用TVM部署的手势检测模型的运行速度是libtorch中的5倍左右，精度还没有测试，但是在我用摄像头进行演示过程中并没有发现明显的区别。当然还需要进一步的测试，就不在这里多说了。
+
+哦对了，在树莓派中，这个模型还没有达到实时(53ms)，但是无论对TVM还是对我来说，依然还有很大的优化空间，实时只是时间关系。
+
+层的支持程度
+当然因为TVM还处于开发阶段，有一些层时不支持的，上文中的mobilenetv2-128_S.onnx模型一开始使用Relay IR前端读取的时候提示，TVM中没有flatten层的支持，而mobilenetv2-128_S.onnx中有一个flatten层，所以提示报错。
+
+但是这个是问题吗？只要我们仔细看看TVM的源码，熟悉熟悉结构，就可以自己加层了，但其实flatten的操作函数在TVM中已经存在了，只是ONNX的前端接口没有展示出来，onnx前端展示的是batch_flatten这个函数，其实batch_flatten就是flatten的特殊版，于是简单修改源码，重新编译一下就可以成功读取自己的模型了。
+
+后记
+限于时间关系，就暂时说到这里，之后会根据自己的时间发布一些TVM的文章，TVM相关的中文文章太少了，自己就干脆贡献一点吧。不过真的很感谢TVM的工作，真的很强~
+
+
+
+#### codegen_cpu.cc:(.text+0x6366)：对‘llvm::User::operator delete(void*)’未定义的引用 是由于tvm编译出的静态.a文件依赖于llvm的某些.a文件
+所有在其他项目中依赖libtvm.a时，也要libtvm.a 依赖的llvm*.a加入到cmake中
+
+
+
+#### tvm 编译静态runtime 库（libtvm_runtime.a）
+新建一个tvm.cc文件，然后文件内容为：
+//
+// Created by RogerOu on 2018.
+//
+
+#include <sys/stat.h>
+#include <fstream>
+
+#include "c_dsl_api.cc"
+#include "c_runtime_api.cc"
+#include "cpu_device_api.cc"
+#include "workspace_pool.cc"
+#include "module_util.cc"
+#include "system_lib_module.cc"
+#include "module.cc"
+#include "registry.cc"
+#include "file_util.cc"
+#include "builtin_fp16.cc"
+#include "dso_module.cc"
+#include "thread_pool.cc"
+#include "threading_backend.cc"
+#include "ndarray.cc"
+#include "../contrib/sort/sort.cc"
+#include "../src/runtime/graph/graph_runtime.cc"
+#include "vm/memory_manager.cc"
+#include "vm/object.cc"
+#include "vm/vm.cc"
+目的是将程序运行中依赖的所有文件打包到一个文件中，然后在CMakeList.txt文件中的RUNTIME_SRCS中仅包含这个tvm.cc
+即可将所有上述.cc文件打包到一个静态库.a文件中，然后在其他项目中依赖这个.a文件，并将tvm下include中的.h文件也依赖进去
+即可在该项目中调用tvm
+
+
+
+### 
+tracker = tvm.rpc.connect_tracker(proxy_host, proxy_port)
+remote = tracker.request(key, priority=0, session_timeout=1000000)  
+在调用
+with nnvm.compiler.build_config(opt_level=3):
+    graph, lib, params = nnvm.compiler.build(
+    net, target=target, target_host=target_host,shape={'data': input_shape}, params=params, dtype=dtype)
+时候 如果remote的session_timeout 设置的session时间过短，tvm 的app在远端会断开，此时build会被中段，导致出现
+tvm/src/runtime/rpc/rpc_session.cc", line 875
+TVMError: Check failed: code == RPCCode: :kReturn: code=4
+
+
+针对arm64 （rk3399 64位板卡）
+target = 'llvm -target=arm64-linux-android'
+lib.export_library('./deploy_lib_rk3399_mob.so',cc='/Users/mac/PycharmProjects/android-ndk-r19c/android-toolchain-arm64/bin/aarch64-linux-android-gcc')
+
+
+
+### 编译sonic依赖tvm runtime的时候出现了大量的ldl 错误
+/usr/bin/ld /word/data-gpu-94/fenghui/third_party/tvm/libtvm_runtime.a(tvm.cc.o) undefined reference to symol 'dlclose@GLIBC_2.2.5'
+这种错误只需要在CmakeList文件中添加set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -pedantic  -fPIC -ldl -lm") 重点是将-ldl加上

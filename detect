@@ -1,0 +1,6 @@
+1. ssd 中。先验框即为对应的anchors，priors box 为根据iou从anchors中选中的阈值iou超过设定值的一批anchors
+           边界框即为groundtruth boundingbox， 是和先验框对应的满足iou的groundtruth
+           
+           
+理解ssd：https://zhuanlan.zhihu.com/p/42322126  
+https://github.com/f18298335152h/learn-SSD300

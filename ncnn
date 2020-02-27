@@ -1,0 +1,183 @@
+开启手机端日志收集
+logwrapper ./benchncnn 8 6 0
+adb logcat > 1.txt
+
+过滤文件中含有“ms”的每行 重定向到 result.log文件中
+grep -n "ms\>" mhg_cost_time.log  >& result.log
+
+shufflenet_112_biv9-symbol.json
+
+
+(conv_arm)
+if (num_input >= 64 && num_output >= 64)
+    use_sgemm1x1 = true;
+当输入和输出的通道数不大于64的情况下是不走1x1 卷积优化函数的
+
+
+（conv）默认情况下 use_int8 是未初始化的bool变量，输出未0，所欲默认不走int8的路径,int8 不能乱开，有时会出错
+
+result = 0
+  uint32_t result;
+    result = vget_lane_u32(a,0);
+    result += vget_lane_u32(a,1);
+    
+    
+剪切模型：
+sym, arg_params, aux_params = mx.model.load_checkpoint(prefix, epoch)
+arg_params 存储了权重参数w
+aux_params 存储了辅助参数： moving_mean、 moving_var 等
+sym 存储
+
+如果剪切后某个模型显示为Input，可能是剪切模型是symbol没有被剪掉，但是params文件中被剪掉了，
+所以显示为Input
+
+
+
+尽量增加通道，降低feature map 大小。feature map增加一倍，消耗的时间是原先的若干倍。
+输入尽可能的小。
+
+
+在build.sh中的平台编译选项中添加如下，以debug模式运行
+-DCMAKE_BUILD_TYPE=Debug
+
+
+
+
+在example中修改makefile 最后一行的0 为1 可以debug了，打印debug信息等
+|   $(CMAKE_COMMAND) -S$(CMAKE_SOURCE_DIR) -B$(CMAKE_BINARY_DIR) --check-build-system CMakeFiles/Makefile.cmake 1  此处1 该为0即可debug，查看中间变量信息
+
+
+
+
+在使用pytorch 转onnx 的时候，如果在forward的过程中调用了外部函数，并且外面函数存在torch.ones()这种操作，则可能在onnx转ncnn的时候出现constantfill，
+最新的onnx中已经删除了该操作，并且在ncnn中也没有改operator的支持，绕过改操作的方法是：
+1、 将torch.ones()类似的初始化操作或者调用的外部函数移动到网络结构内部，并且在类的init的初始化中完成该操作，在forward过程中直接使用而不是在forward的过程
+中初始化，即可避免constantfill 的出现
+
+
+
+
+量化技术
+https://github.com/ARM-software/ML-KWS-for-MCU/blob/master/Deployment/Quant_guide.md
+Quantize weights
+Quantizing weights is fairly simple, as the weights are fixed after the training and we know their min/max range. Using these ranges, the weights are quantized or discretized to 256 levels. Here is the code snippet for quantizing the weights and biases to 8-bit integers.
+
+min_wt = weight.min() 
+max_wt = weight.max()
+#find number of integer bits to represent this range
+int_bits = int(np.ceil(np.log2(max(abs(min_wt),abs(max_wt))))) 
+frac_bits = 7-int_bits #remaining bits are fractional bits (1-bit for sign)
+#floating point weights are scaled and rounded to [-128,127], which are used in 
+#the fixed-point operations on the actual hardware (i.e., microcontroller)
+quant_weight = np.round(weight*(2**frac_bits))
+#To quantify the impact of quantized weights, scale them back to
+# original range to run inference using quantized weights
+weight = quant_weight/(2**frac_bits)
+
+float32 的范围为  -3.4*10^38 ~ +3.4*10^38 
+转化为int8
+
+
+
+ncnn build 编译错误，首先考虑是否在CMakeList.txt中添加add_definitions(-g -std=c++11)，当出现类似protobuf的错误时候
+
+
+
+### ncnn 量化方案 ： 
+BUG1989/caffe-int8-convert-tools ncnn量化模型转化工具
+
+formal：
+
+	float32 = (int8 - zero_point) * scale
+int8模型转化： 
+
+	bin=2048, targer_bin = 127，单边找默认（0，th），
+#### 1. weight 量化
+	（1）权重的分布变化不大，且固定，采用固定值的对称量化。（-max，+max）
+	（2）并不是每一层的layer对应一个weight_scale，而是layer对应的weight每一个通道对应一个weight_scale，降低精度对acc的影响。
+#### 2. 激活之非对称量化
+	激活值对应不同的输入起分布变化较大，ncnn采用了两种量化方法：
+	（1）没有校验数据， 类比weight，固定值。
+	（2）有校验数据，采用采用tensorRT -》kl+smooth
+
+int8模型inference：
+
+	每一层layer在forward之前，经过一层（layer）quantized量化过程，将权重和激活的量化值准备好，然后在执行op的forward过程，执行完后，int8类型的结果值，在经过requantized反量化，将int32的值反量化为float32，传递到下一层。
+
+方法：
+
+	1. pytorch int8 scale
+	2. caffe int8 model -> ncnn
+
+
+### MNN
+
+	支持tflite的int8模型的inference，但没有相应的量化模型转化，这方面落后于ncnn，
+	
+### mxnet量化
+
+	https://github.com/apache/incubator/mxnet/blob/master/python/mxnet/contrib/quantization.py
+	
+	https://github.com/apache/incubator-mxnet/pull/9552
+	
+		1. 激活值 kl+smooth（有验证集），bins = 8001, target_bin = 255，阈值的选取是双向选取，从指间的bins开始，向两边按照kl最小化搜索，得到阈值，（-th,th）
+		2.激活值 inference过程中动态计算（performace降低，未实现）
+		
+		3. 权重量化同ncnn,但并不是通道scale，而是层scale。.线性对称量化
+		
+### tvm量化
+
+
+### tflite
+
+google 修正点量化
+
+
+
+
+
+
+### ncnn 部分测试结论
+
+		1. ncnn 量化参数table 解析对接有误。已修复
+		2. kernel_size 3x3 stride 3 耗时提升了5-6倍
+		3. 1x1 小卷积耗时较多，在大feature map是使用小卷积，提过提升计算量减小和float32的耗时差距，因为计算量小，再加上量化和反量化的过程，超过了float32的耗时。
+
+
+
+
+**通过在rk3399上实测量化和非量化模型后，通过对比给出一些能够让量化模型更好加速的建议：
+		1. 在输入输出的channel相同的情况下，feature map越小，channel越大，加速比越高
+		![Alt text](./1561518143194.png)
+		![Alt text](./1561518152131.png)
+	2. 在输入输出的channle不同的情况下（1）升维耗时大于降维 (2). 尽量降低feature map增大channel 	
+(1)
+![Alt text](./1561518433937.png)
+![Alt text](./1561518438896.png)
+(2)
+![Alt text](./1561518529123.png)
+![Alt text](./1561518533456.png)
+3. 不要保持双高卷积操作（大的feature，高的维度，量化拖慢速度）
+		(1)快速的升维，以减少在大的feature map上升维带来的时间开销
+	    (2) feature map 快速的减小，然后在小的feature map升维，如果不能快速减小。在快速升维后，保持在相同的channel下，走卷积。然后在降维，降维可以不必快速。
+4. channel 尽量是16， 32， 64， 256， 512 ，1024 这种16 的偶数倍，不要奇怪的chennel。 尽量使用1x1 卷积升维度。部分网络的加速比之所以高，就是因为没有采用奇怪的channel和feature map， ncnn内部的卷积算法在做内存分配时涉及到对齐，分配内存或者访存的时候，奇怪的channel会导致时间开销比较高
+![Alt text](./1561519041222.png)
+![Alt text](./1561519053995.png)
+5. ConvolutionDepthWise 尽量不要使用，在量化模型中ConvolutionDepthWise 表现的性能比较差**
+
+
+
+
+###
+./onnx2ncnn: error while loading shared libraries: libprotobuf.so.17: cannot open shared object file: No such file or directory
+原因： 在其它环境的机器上编译出来的可执行文件在本机上不一定可以执行，因为环境不一致，此处即为本机的protobuf和得到可执行文件的机器protobuf不一致捯饬
+
+###
+ncnn 编译时 cmake .. 可能提示protobuf的版本和找到的protobuf lib版本不一致，此时在cmake时要指定你所使用的protobuf
+cmake -DCMAKE_PREFIX_PATH=/your protobuf floder
+
+
+
+
+
+
